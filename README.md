@@ -65,6 +65,20 @@ curl -X POST http://localhost:8080/api/chat \
 
 Set `AI_MODEL` to use a different model. When Spring Boot runs outside Docker, set `AI_BASE_URL=http://localhost:11434`.
 
+## Production deployment
+
+`docker-compose.production.yml` runs only PostgreSQL and this API. Ollama stays
+on a separate server and is configured through `AI_BASE_URL`.
+
+The deployment workflow publishes the API image to GHCR and deploys it over
+SSH on every push to `main`. Configure these GitHub Actions secrets:
+
+- `VPS_HOST` - API server public IP
+- `VPS_USER` - SSH user, normally `ubuntu`
+- `VPS_SSH_KEY` - complete private SSH key
+- `POSTGRES_PASSWORD` - strong database password
+- `AI_BASE_URL` - URL of the separate Ollama server, including port `11434`
+
 ## Test
 
 ```bash

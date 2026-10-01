@@ -1,0 +1,90 @@
+name: Publish and deploy recommendation API
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/floydkuhlula91-lab/agritech-recommendation-api
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+
+  deployment-secrets:
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+      AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
+    steps:
+      - id: check
+        shell: bash
+        run: |
+          if [ -n "$VPS_HOST" ] && [ -n "$VPS_USER" ] && [ -n "$VPS_SSH_KEY" ] \
+             && [ -n "$POSTGRES_PASSWORD" ] && [ -n "$AI_BASE_URL" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Deployment skipped until all five production secrets are configured."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy:
+    needs: [publish, deployment-secrets]
+    if: needs.deployment-secrets.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
+          AI_MODEL: ${{ vars.AI_MODEL || 'qwen2.5:0.5b' }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: POSTGRES_PASSWORD,AI_BASE_URL,AI_MODEL,GHCR_TOKEN
+          script: |
+            set -e
+            if [ -d ~/agritech-recommendation-api/.git ]; then
+              cd ~/agritech-recommendation-api
+              git fetch origin main
+              git reset --hard origin/main
+            else
+              git clone --branch main https://github.com/${{ github.repository }}.git ~/agritech-recommendation-api
+              cd ~/agritech-recommendation-api
+            fi
+            printf 'POSTGRES_PASSWORD=%s\nAI_BASE_URL=%s\nAI_MODEL=%s\n' \
+              "$POSTGRES_PASSWORD" "$AI_BASE_URL" "$AI_MODEL" > .env.production
+            chmod 600 .env.production
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+            docker compose --env-file .env.production -f docker-compose.production.yml pull
+            docker compose --env-file .env.production -f docker-compose.production.yml up -d --remove-orphans
+            docker compose --env-file .env.production -f docker-compose.production.yml ps
